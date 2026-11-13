@@ -1,90 +1,186 @@
 
-name: Build Kade Engine Android
+name: Kade Engine 1.8 Android Build
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - stable
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Compile Android APK
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
-      - name: Install dependencies
+      # 1. Baixar o próprio repositório
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Verificar os arquivos do projeto
+      - name: Check project files
+        run: |
+          test -f Project.xml
+          test -d source
+          test -d assets
+          echo "Kade Engine source found."
+
+      # 3. Instalar ferramentas Linux
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip build-essential
+          sudo apt-get install -y \
+            git \
+            zip \
+            unzip \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3
 
-      - name: Install Haxe
-        uses: krdlab/setup-haxe@v1
-        with:
-          haxe-version: 4.2.4
-
+      # 4. Instalar Java 17
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
 
+      # 5. Instalar Haxe 4.2.5
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1.1.5
+        with:
+          haxe-version: 4.2.5
+
+      # 6. Configurar Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
+      # 7. Instalar SDK e NDK
+      - name: Install Android SDK and NDK
         run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-33"
-          sdkmanager "build-tools;33.0.2"
-          sdkmanager "ndk;21.4.7075529"
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-33" \
+            "build-tools;33.0.2" \
+            "ndk;21.4.7075529"
 
-      - name: Download Kade Engine Android
-        run: |
-          git clone --depth 1 \
-            https://github.com/TheLeerName/Kade-Engine-android.git \
-            Kade-Engine-android
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/21.4.7075529" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/21.4.7075529" >> $GITHUB_ENV
 
-      - name: Install Haxe libraries
-        working-directory: Kade-Engine-android
+      # 8. Configurar Haxelib
+      - name: Setup Haxelib
         run: |
           haxelib setup "$HOME/haxelib"
+          haxelib install hxcpp 4.2.1
           haxelib install lime 7.9.0
-          haxelib install openfl
+          haxelib install openfl 9.1.0
           haxelib install flixel 4.11.0
           haxelib install flixel-addons 2.11.0
-          haxelib install flixel-ui
+          haxelib install flixel-ui 2.4.0
           haxelib install hscript
-          haxelib install hxcpp
+          haxelib install actuate
 
-      - name: Configure Android
-        working-directory: Kade-Engine-android
+      # 9. Instalar dependências Android
+      - name: Install Android Haxe libraries
         run: |
-          export ANDROID_SDK="$ANDROID_HOME"
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/21.4.7075529"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          haxelib git extension-webm https://github.com/Sirox228/extension-webm.git
 
-          haxelib run lime setup
-          haxelib run lime setup android -- \
-            --ANDROID_SDK "$ANDROID_HOME" \
-            --ANDROID_NDK_DIR "$ANDROID_NDK_HOME" \
-            --JAVA_HOME "$JAVA_HOME"
+          haxelib git linc_luajit https://github.com/Sirox228/linc_luajit.git
 
+          haxelib git polymod https://github.com/MasterEric/polymod.git
+
+          haxelib git extension-androidtools https://github.com/LimeExtensions/extension-androidtools.git
+
+          haxelib list
+
+      # 10. Adicionar extensão Android ao Project.xml
+      - name: Configure Android project
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          project = Path("Project.xml")
+          content = project.read_text()
+
+          android_lib = '<haxelib name="extension-androidtools" if="android" />'
+
+          if android_lib not in content:
+              marker = '<haxelib name="flixel-ui" />'
+              if marker not in content:
+                  raise SystemExit("Could not find flixel-ui in Project.xml")
+              content = content.replace(
+                  marker,
+                  marker + "\n\t" + android_lib,
+                  1
+              )
+
+          android_assets = Path("assets/android")
+          android_asset_tag = '<assets path="assets/android" if="android" />'
+
+          if android_assets.is_dir() and android_asset_tag not in content:
+              marker = '<classpath name="source" />'
+              content = content.replace(
+                  marker,
+                  marker + "\n\t" + android_asset_tag,
+                  1
+              )
+
+          project.write_text(content)
+          print("Android Project.xml configuration completed.")
+          PY
+
+      # 11. Verificar biblioteca WebM
+      - name: Verify Android WebM library
+        run: |
+          WEBM_LIB=$(find "$HOME/haxelib/extension-webm" \
+            -type f -name "libextension-webm-v7.so" -print -quit)
+
+          if [ -z "$WEBM_LIB" ]; then
+            echo "::error::Android WebM native library is missing."
+            echo "The extension-webm Android fork must provide libextension-webm-v7.so."
+            exit 1
+          fi
+
+          echo "WebM Android library found: $WEBM_LIB"
+
+      # 12. Configurar Lime
+      - name: Configure Lime Android
+        run: |
+          haxelib run lime setup -alias -y
+
+          haxelib run lime config ANDROID_SDK "$ANDROID_HOME"
+          haxelib run lime config ANDROID_NDK_ROOT "$ANDROID_NDK_HOME"
+          haxelib run lime config JAVA_HOME "$JAVA_HOME"
           haxelib run lime config ANDROID_SETUP true
 
-      - name: Build APK
-        working-directory: Kade-Engine-android
+      # 13. Compilar APK
+      - name: Build Kade Engine Android
         run: |
-          export ANDROID_SDK="$ANDROID_HOME"
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/21.4.7075529"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-
           haxelib run lime build android -final
 
+      # 14. Verificar APK
+      - name: Verify APK
+        run: |
+          find export -type f -name "*.apk" -print
+
+          APK=$(find export -type f -name "*.apk" -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "::error::No APK was generated."
+            exit 1
+          fi
+
+          echo "APK generated: $APK"
+
+      # 15. Disponibilizar APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Kade-Engine-Android-APK
-          path: Kade-Engine-android/export/**/*.apk
+          name: Kade-Engine-1.8-Android
+          path: export/**/*.apk
           if-no-files-found: error
           retention-days: 7
-          
